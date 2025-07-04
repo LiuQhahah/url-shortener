@@ -2,7 +2,6 @@
 package main
 
 import (
-	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
 	"html/template"
@@ -10,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/dgraph-io/badger/v3"
+	"github.com/spaolacci/murmur3"
 )
 
 var (
@@ -92,7 +92,7 @@ func handleRedirect(w http.ResponseWriter, r *http.Request) {
 }
 
 func generateShortURL(data string) string {
-	hasher := sha1.New()
+	hasher := murmur3.New128()
 	hasher.Write([]byte(data))
 	return hex.EncodeToString(hasher.Sum(nil))[:8]
 }

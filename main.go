@@ -2,12 +2,17 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
 	"net/http"
+	"os"
+	"sync"
+	"time"
 
 	"github.com/dgraph-io/badger/v3"
 	"github.com/spaolacci/murmur3"
@@ -15,6 +20,16 @@ import (
 
 var (
 	db *badger.DB
+
+	adminUser     = getEnv("ADMIN_USERNAME", "admin")
+	adminPassword = getEnv("ADMIN_PASSWORD", "password") // In a real application, use hashed passwords!
+
+	sessions     = make(map[string]time.Time)
+	sessionsMutex sync.Mutex
+	cookieName   = "session_token"
+	sessionExpiry = 10 * time.Minute
+
+	baseURL = getEnv("BASE_URL", "http://localhost:8080")
 )
 
 func main() {
@@ -28,8 +43,12 @@ func main() {
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/shorten", handleShorten)
 	http.HandleFunc("/s/", handleRedirect)
-	http.HandleFunc("/count", handleCount)
-	http.HandleFunc("/mappings", handleMappings)
+	http.HandleFunc("/login", loginHandler)
+	http.HandleFunc("/logout", logoutHandler)
+	http.HandleFunc("/admin", handleAdmin)
+
+	http.HandleFunc("/count", authMiddleware(handleCount))
+	http.HandleFunc("/mappings", authMiddleware(handleMappings))
 
 	fmt.Println("Server started at :8080")
 	http.ListenAndServe(":8080", nil)
@@ -86,6 +105,115 @@ func handleMappings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(mappings)
 }
 
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+		return
+	}
+
+	username := r.FormValue("username")
+	password := r.FormValue("password")
+
+	if username == adminUser && password == adminPassword {
+		sessionToken, err := generateSessionToken()
+		if err != nil {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		sessionsMutex.Lock()
+		sessions[sessionToken] = time.Now().Add(sessionExpiry)
+		sessionsMutex.Unlock()
+
+		http.SetCookie(w, &http.Cookie{
+			Name:    cookieName,
+			Value:   sessionToken,
+			Expires: time.Now().Add(sessionExpiry),
+			Path:    "/",
+			HttpOnly: true,
+		})
+
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+		return
+	}
+
+	http.Redirect(w, r, "/admin?error=1", http.StatusSeeOther)
+}
+
+func logoutHandler(w http.ResponseWriter, r *http.Request) {
+	c, err := r.Cookie(cookieName)
+	if err == nil {
+		sessionsMutex.Lock()
+		delete(sessions, c.Value)
+		sessionsMutex.Unlock()
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:    cookieName,
+		Value:   "",
+		Expires: time.Now().AddDate(-1, 0, 0), // Expire immediately
+		Path:    "/",
+		HttpOnly: true,
+	})
+
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie(cookieName)
+		if err != nil {
+			http.Redirect(w, r, "/admin", http.StatusSeeOther)
+			return
+		}
+
+		sessionsMutex.Lock()
+		expiry, ok := sessions[c.Value]
+		sessionsMutex.Unlock()
+
+		if !ok || expiry.Before(time.Now()) {
+			http.Redirect(w, r, "/admin", http.StatusSeeOther)
+			return
+		}
+
+		// Update session expiry
+		sessionsMutex.Lock()
+		sessions[c.Value] = time.Now().Add(sessionExpiry)
+		sessionsMutex.Unlock()
+
+		next.ServeHTTP(w, r)
+	}
+}
+
+func handleAdmin(w http.ResponseWriter, r *http.Request) {
+	// Check if authenticated
+	c, err := r.Cookie(cookieName)
+	isAuthenticated := false
+	if err == nil {
+		sessionsMutex.Lock()
+		expiry, ok := sessions[c.Value]
+		sessionsMutex.Unlock()
+		if ok && expiry.After(time.Now()) {
+			isAuthenticated = true
+		}
+	}
+
+	data := struct {
+		IsAuthenticated bool
+		Error           bool
+	}{
+		IsAuthenticated: isAuthenticated,
+		Error:           r.URL.Query().Get("error") == "1",
+	}
+
+	tmpl, err := template.ParseFiles("templates/admin.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, data)
+}
+
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	tmpl, err := template.ParseFiles("templates/index.html")
@@ -118,7 +246,7 @@ func handleShorten(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Fprintf(w, "Shortened URL: http://localhost:8080/s/%s", shortURL)
+	fmt.Fprintf(w, "Shortened URL: %s/s/%s", baseURL, shortURL)
 }
 
 func handleRedirect(w http.ResponseWriter, r *http.Request) {
@@ -150,4 +278,22 @@ func generateShortURL(data string) string {
 	hasher := murmur3.New128()
 	hasher.Write([]byte(data))
 	return hex.EncodeToString(hasher.Sum(nil))[:8]
+}
+
+func generateSessionToken() (string, error) {
+	b := make([]byte, 32)
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
+}
+
+// getEnv reads an environment variable or returns a default value.
+func getEnv(key, defaultValue string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	return value
 }

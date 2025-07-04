@@ -49,13 +49,13 @@ This is a simple URL shortening service built with Go and BadgerDB.
 1.  **Build the Docker image:**
 
     ```bash
-    docker build -t url-shortener .
+     docker build -t url-shortener:latest  .
     ```
 
 2.  **Run the Docker container:**
 
     ```bash
-    docker run -d -p 8080:8080 -v $HOME/badger_data:/tmp/badger url-shortener:latest
+    docker run -d -p 8080:8080 -v $HOME/badger_data:/tmp/badger -e ADMIN_USERNAME=myadmin -e ADMIN_PASSWORD=securepassword -e BASE_URL=http://localhost:8080  url-shortener:latest
     ```
 
     The application will be accessible at `http://localhost:8080`.

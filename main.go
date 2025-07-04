@@ -27,10 +27,16 @@ type URLData struct {
 }
 
 type MappingsResponse struct {
-	Mappings   map[string]URLData `json:"mappings"`
-	TotalCount int                `json:"total_count"`
-	Page       int                `json:"page"`
-	PageSize   int                `json:"page_size"`
+	Mappings   []MappingEntry `json:"mappings"`
+	TotalCount int            `json:"total_count"`
+	Page       int            `json:"page"`
+	PageSize   int            `json:"page_size"`
+	TotalPages int            `json:"total_pages"`
+}
+
+type MappingEntry struct {
+	ShortURL string `json:"short_url"`
+	URLData
 }
 
 var (
@@ -63,9 +69,11 @@ func main() {
 	http.HandleFunc("/admin", handleAdmin)
 
 	http.HandleFunc("/count", authMiddleware(handleCount))
-	http.HandleFunc("/mappings", authMiddleware(handleMappings))
-	http.HandleFunc("/admin/mappings", authMiddleware(handleAdminMappings))
+	http.HandleFunc("/mappings-api", authMiddleware(handleMappingsAPI))
+	http.HandleFunc("/admin/mappings", authMiddleware(handleAdminMappingsPage))
 	http.HandleFunc("/mock-shorten", authMiddleware(handleMockShorten))
+
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 
 	fmt.Println("Server started at :8080")
 	http.ListenAndServe(":8080", nil)
@@ -92,44 +100,7 @@ func handleCount(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Total URLs stored: %d\n", count)
 }
 
-func handleMappings(w http.ResponseWriter, r *http.Request) {
-	mappings := make(map[string]URLData)
-	err := db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchSize = 100
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Rewind(); it.Valid(); it.Next() {
-			item := it.Item()
-			k := item.Key()
-			valCopy, err := item.ValueCopy(nil)
-			if err != nil {
-				return err
-			}
-
-			var urlData URLData
-			jsonErr := json.Unmarshal(valCopy, &urlData)
-			if jsonErr != nil { // If unmarshaling fails, assume it's an old plain string
-				urlData = URLData{
-					OriginalURL: string(valCopy),
-					Count:       0,
-				}
-			}
-			mappings[string(k)] = urlData
-		}
-		return nil
-	})
-
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(mappings)
-}
-
-func handleAdminMappings(w http.ResponseWriter, r *http.Request) {
+func handleMappingsAPI(w http.ResponseWriter, r *http.Request) {
 	pageStr := r.URL.Query().Get("page")
 	pageSizeStr := r.URL.Query().Get("pageSize")
 
@@ -139,17 +110,14 @@ func handleAdminMappings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pageSize, err := strconv.Atoi(pageSizeStr)
-	if err != nil || pageSize < 1 || pageSize > 1000 {
+	if err != nil || pageSize < 1 || pageSize > 1000 { // Limit page size to prevent abuse
 		pageSize = 100
 	}
 
 	offset := (page - 1) * pageSize
 	limit := pageSize
 
-	var paginatedMappings []struct {
-		ShortURL string
-		URLData
-	}
+	var paginatedMappings []MappingEntry
 	totalCount := 0
 	currentCount := 0
 
@@ -183,16 +151,13 @@ func handleAdminMappings(w http.ResponseWriter, r *http.Request) {
 
 			var urlData URLData
 			jsonErr := json.Unmarshal(valCopy, &urlData)
-			if jsonErr != nil {
+			if jsonErr != nil { // If unmarshaling fails, assume it's an old plain string
 				urlData = URLData{
 					OriginalURL: string(valCopy),
 					Count:       0,
 				}
 			}
-			paginatedMappings = append(paginatedMappings, struct {
-				ShortURL string
-				URLData
-			}{
+			paginatedMappings = append(paginatedMappings, MappingEntry{
 				ShortURL: string(k),
 				URLData:  urlData,
 			})
@@ -212,35 +177,25 @@ func handleAdminMappings(w http.ResponseWriter, r *http.Request) {
 		totalPages = 1
 	}
 
-	data := struct {
-		Mappings []struct {
-			ShortURL string
-			URLData
-		}
-		TotalCount  int
-		Page        int
-		PageSize    int
-		TotalPages  int
-		PrevPage    int
-		NextPage    int
-		PageNumbers []int
-	}{
-		Mappings:    paginatedMappings,
-		TotalCount:  totalCount,
-		Page:        page,
-		PageSize:    pageSize,
-		TotalPages:  totalPages,
-		PrevPage:    page - 1,
-		NextPage:    page + 1,
-		PageNumbers: generatePageNumbers(page, totalPages),
+	response := MappingsResponse{
+		Mappings:   paginatedMappings,
+		TotalCount: totalCount,
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func handleAdminMappingsPage(w http.ResponseWriter, r *http.Request) {
 	tmpl, err := template.ParseFiles("templates/admin_mappings.html")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	tmpl.Execute(w, data)
+	tmpl.Execute(w, nil)
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request) {

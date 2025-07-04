@@ -23,6 +23,7 @@ WORKDIR /app
 COPY --from=builder /app/url-shortener .
 # Copy the templates
 COPY templates/ templates/
+COPY static/ static/
 
 EXPOSE 8080
 

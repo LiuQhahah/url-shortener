@@ -19,10 +19,10 @@
 </head>
 <body>
     <div class="container">
-        <h1>URL Mappings (Page {{.Page}} of {{.TotalPages}})</h1>
-        <p>Total URLs: {{.TotalCount}}</p>
+        <h1>URL Mappings</h1>
+        <p>Total URLs: <span id="totalUrls">...</span></p>
 
-        <table>
+        <table id="mappingsTable">
             <thead>
                 <tr>
                     <th>Short URL</th>
@@ -33,41 +33,17 @@
                 </tr>
             </thead>
             <tbody>
-                {{range .Mappings}}
-                <tr>
-                    <td>{{.ShortURL}}</td>
-                    <td><a href="{{.OriginalURL}}" target="_blank">{{.OriginalURL}}</a></td>
-                    <td>{{.Count}}</td>
-                    <td>{{.Device}}</td>
-                    <td>{{.OS}}</td>
-                </tr>
-                {{end}}
+                <!-- Mappings will be loaded here by JavaScript -->
             </tbody>
         </table>
 
-        <div class="pagination">
-            {{if gt .Page 1}}
-                <a href="/admin/mappings?page={{.PrevPage}}&pageSize={{.PageSize}}">Previous</a>
-            {{else}}
-                <span class="disabled">Previous</span>
-            {{end}}
-
-            {{range $i := .PageNumbers}}
-                {{if eq $i $.Page}}
-                    <span class="current">{{$i}}</span>
-                {{else}}
-                    <a href="/admin/mappings?page={{$i}}&pageSize={{$.PageSize}}">{{$i}}</a>
-                {{end}}
-            {{end}}
-
-            {{if lt .Page .TotalPages}}
-                <a href="/admin/mappings?page={{.NextPage}}&pageSize={{.PageSize}}">Next</a>
-            {{else}}
-                <span class="disabled">Next</span>
-            {{end}}
+        <div id="paginationControls" class="pagination">
+            <!-- Pagination controls will be loaded here by JavaScript -->
         </div>
 
         <p><a href="/admin">Back to Admin Panel</a></p>
     </div>
+
+    <script src="/static/js/admin_mappings.js"></script>
 </body>
 </html>

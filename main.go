@@ -397,7 +397,8 @@ func handleShorten(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Fprintf(w, "Shortened URL: %s/s/%s", baseURL, shortURL)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"short_url": fmt.Sprintf("%s/s/%s", baseURL, shortURL)})
 }
 
 func handleRedirect(w http.ResponseWriter, r *http.Request) {

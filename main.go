@@ -1,4 +1,3 @@
-
 package main
 
 import (
@@ -15,12 +14,15 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v3"
+	"github.com/mssola/user_agent"
 	"github.com/spaolacci/murmur3"
 )
 
 type URLData struct {
 	OriginalURL string `json:"original_url"`
 	Count       int    `json:"count"`
+	Device      string `json:"device,omitempty"`
+	OS          string `json:"os,omitempty"`
 }
 
 var (
@@ -29,9 +31,9 @@ var (
 	adminUser     = getEnv("ADMIN_USERNAME", "admin")
 	adminPassword = getEnv("ADMIN_PASSWORD", "password") // In a real application, use hashed passwords!
 
-	sessions     = make(map[string]time.Time)
+	sessions      = make(map[string]time.Time)
 	sessionsMutex sync.Mutex
-	cookieName   = "session_token"
+	cookieName    = "session_token"
 	sessionExpiry = 10 * time.Minute
 
 	baseURL = getEnv("BASE_URL", "http://localhost:8080")
@@ -138,10 +140,10 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		sessionsMutex.Unlock()
 
 		http.SetCookie(w, &http.Cookie{
-			Name:    cookieName,
-			Value:   sessionToken,
-			Expires: time.Now().Add(sessionExpiry),
-			Path:    "/",
+			Name:     cookieName,
+			Value:    sessionToken,
+			Expires:  time.Now().Add(sessionExpiry),
+			Path:     "/",
 			HttpOnly: true,
 		})
 
@@ -161,10 +163,10 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:    cookieName,
-		Value:   "",
-		Expires: time.Now().AddDate(-1, 0, 0), // Expire immediately
-		Path:    "/",
+		Name:     cookieName,
+		Value:    "",
+		Expires:  time.Now().AddDate(-1, 0, 0), // Expire immediately
+		Path:     "/",
 		HttpOnly: true,
 	})
 
@@ -298,6 +300,15 @@ func handleRedirect(w http.ResponseWriter, r *http.Request) {
 				Count:       0,
 			}
 		}
+
+		// Parse User-Agent
+		ua := user_agent.New(r.UserAgent())
+
+		osName := ua.OS()
+		browserName, _ := ua.Browser()
+
+		urlData.OS = osName
+		urlData.Device = browserName // Using browser as a proxy for device for now
 
 		urlData.Count++
 		updatedDataBytes, err := json.Marshal(urlData)

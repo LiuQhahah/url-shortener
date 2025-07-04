@@ -23,9 +23,19 @@
             <p>Welcome, Admin!</p>
             <div class="links">
                 <a href="/count">View URL Count</a>
-                <a href="/mappings">View All Mappings</a>
+                <a href="/admin/mappings">View All Mappings</a>
                 <a href="/logout">Logout</a>
             </div>
+
+            <h2>Generate Mock URLs</h2>
+            {{if .Message}}
+                <p style="color: green;">{{.Message}}</p>
+            {{end}}
+            <form action="/mock-shorten" method="post">
+                <label for="mockCount">Number of URLs to generate:</label><br>
+                <input type="number" id="mockCount" name="count" value="100" min="1" required><br><br>
+                <button type="submit">Generate</button>
+            </form>
         {{else}}
             <p>Please log in to access the admin features.</p>
             {{if .Error}}

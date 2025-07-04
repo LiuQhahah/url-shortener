@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -23,6 +24,13 @@ type URLData struct {
 	Count       int    `json:"count"`
 	Device      string `json:"device,omitempty"`
 	OS          string `json:"os,omitempty"`
+}
+
+type MappingsResponse struct {
+	Mappings   map[string]URLData `json:"mappings"`
+	TotalCount int                `json:"total_count"`
+	Page       int                `json:"page"`
+	PageSize   int                `json:"page_size"`
 }
 
 var (
@@ -56,6 +64,8 @@ func main() {
 
 	http.HandleFunc("/count", authMiddleware(handleCount))
 	http.HandleFunc("/mappings", authMiddleware(handleMappings))
+	http.HandleFunc("/admin/mappings", authMiddleware(handleAdminMappings))
+	http.HandleFunc("/mock-shorten", authMiddleware(handleMockShorten))
 
 	fmt.Println("Server started at :8080")
 	http.ListenAndServe(":8080", nil)
@@ -117,6 +127,120 @@ func handleMappings(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(mappings)
+}
+
+func handleAdminMappings(w http.ResponseWriter, r *http.Request) {
+	pageStr := r.URL.Query().Get("page")
+	pageSizeStr := r.URL.Query().Get("pageSize")
+
+	page, err := strconv.Atoi(pageStr)
+	if err != nil || page < 1 {
+		page = 1
+	}
+
+	pageSize, err := strconv.Atoi(pageSizeStr)
+	if err != nil || pageSize < 1 || pageSize > 1000 {
+		pageSize = 100
+	}
+
+	offset := (page - 1) * pageSize
+	limit := pageSize
+
+	var paginatedMappings []struct {
+		ShortURL string
+		URLData
+	}
+	totalCount := 0
+	currentCount := 0
+
+	err = db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchSize = 100
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		// First pass to get total count
+		for it.Rewind(); it.Valid(); it.Next() {
+			totalCount++
+		}
+
+		// Second pass for paginated data
+		it.Rewind()
+		for i := 0; i < offset; i++ {
+			if !it.Valid() {
+				break
+			}
+			it.Next()
+		}
+
+		for it.Valid() && currentCount < limit {
+			item := it.Item()
+			k := item.Key()
+			valCopy, err := item.ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+
+			var urlData URLData
+			jsonErr := json.Unmarshal(valCopy, &urlData)
+			if jsonErr != nil {
+				urlData = URLData{
+					OriginalURL: string(valCopy),
+					Count:       0,
+				}
+			}
+			paginatedMappings = append(paginatedMappings, struct {
+				ShortURL string
+				URLData
+			}{
+				ShortURL: string(k),
+				URLData:  urlData,
+			})
+			currentCount++
+			it.Next()
+		}
+		return nil
+	})
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	totalPages := (totalCount + pageSize - 1) / pageSize
+	if totalPages == 0 && totalCount > 0 {
+		totalPages = 1
+	}
+
+	data := struct {
+		Mappings []struct {
+			ShortURL string
+			URLData
+		}
+		TotalCount  int
+		Page        int
+		PageSize    int
+		TotalPages  int
+		PrevPage    int
+		NextPage    int
+		PageNumbers []int
+	}{
+		Mappings:    paginatedMappings,
+		TotalCount:  totalCount,
+		Page:        page,
+		PageSize:    pageSize,
+		TotalPages:  totalPages,
+		PrevPage:    page - 1,
+		NextPage:    page + 1,
+		PageNumbers: generatePageNumbers(page, totalPages),
+	}
+
+	tmpl, err := template.ParseFiles("templates/admin_mappings.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, data)
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request) {
@@ -215,9 +339,11 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 	data := struct {
 		IsAuthenticated bool
 		Error           bool
+		Message         string // Added for mock generation feedback
 	}{
 		IsAuthenticated: isAuthenticated,
 		Error:           r.URL.Query().Get("error") == "1",
+		Message:         r.URL.Query().Get("message"),
 	}
 
 	tmpl, err := template.ParseFiles("templates/admin.html")
@@ -326,6 +452,47 @@ func handleRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, urlData.OriginalURL, http.StatusFound)
 }
 
+func handleMockShorten(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	countStr := r.FormValue("count")
+	count, err := strconv.Atoi(countStr)
+	if err != nil || count <= 0 {
+		http.Error(w, "Invalid count parameter", http.StatusBadRequest)
+		return
+	}
+
+	var generated int
+	for i := 0; i < count; i++ {
+		originalURL := fmt.Sprintf("http://example.com/long/url/%d/%d", time.Now().UnixNano(), i)
+		shortURL := generateShortURL(originalURL)
+
+		data := URLData{
+			OriginalURL: originalURL,
+			Count:       0,
+		}
+		dataBytes, err := json.Marshal(data)
+		if err != nil {
+			log.Printf("Error marshaling URLData: %v", err)
+			continue
+		}
+
+		err = db.Update(func(txn *badger.Txn) error {
+			return txn.Set([]byte(shortURL), dataBytes)
+		})
+		if err != nil {
+			log.Printf("Error setting short URL in DB: %v", err)
+			continue
+		}
+		generated++
+	}
+
+	http.Redirect(w, r, fmt.Sprintf("/admin?message=Successfully generated %d mock short URLs.", generated), http.StatusSeeOther)
+}
+
 func generateShortURL(data string) string {
 	hasher := murmur3.New128()
 	hasher.Write([]byte(data))
@@ -348,4 +515,22 @@ func getEnv(key, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+// generatePageNumbers generates a slice of page numbers to display in pagination controls.
+func generatePageNumbers(currentPage, totalPages int) []int {
+	var pageNumbers []int
+	startPage := currentPage - 2
+	if startPage < 1 {
+		startPage = 1
+	}
+	endPage := currentPage + 2
+	if endPage > totalPages {
+		endPage = totalPages
+	}
+
+	for i := startPage; i <= endPage; i++ {
+		pageNumbers = append(pageNumbers, i)
+	}
+	return pageNumbers
 }

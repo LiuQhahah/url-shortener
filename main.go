@@ -1,0 +1,98 @@
+
+package main
+
+import (
+	"crypto/sha1"
+	"encoding/hex"
+	"fmt"
+	"html/template"
+	"log"
+	"net/http"
+
+	"github.com/dgraph-io/badger/v3"
+)
+
+var (
+	db *badger.DB
+)
+
+func main() {
+	var err error
+	db, err = badger.Open(badger.DefaultOptions("/tmp/badger"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	http.HandleFunc("/", handleIndex)
+	http.HandleFunc("/shorten", handleShorten)
+	http.HandleFunc("/s/", handleRedirect)
+
+	fmt.Println("Server started at :8080")
+	http.ListenAndServe(":8080", nil)
+}
+
+func handleIndex(w http.ResponseWriter, r *http.Request) {
+	tmpl, err := template.ParseFiles("templates/index.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, nil)
+}
+
+func handleShorten(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	originalURL := r.FormValue("url")
+	if originalURL == "" {
+		http.Error(w, "URL is required", http.StatusBadRequest)
+		return
+	}
+
+	shortURL := generateShortURL(originalURL)
+
+	err := db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(shortURL), []byte(originalURL))
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Fprintf(w, "Shortened URL: http://localhost:8080/s/%s", shortURL)
+}
+
+func handleRedirect(w http.ResponseWriter, r *http.Request) {
+	shortURL := r.URL.Path[len("/s/"):]
+	if shortURL == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	var originalURL []byte
+	err := db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(shortURL))
+		if err != nil {
+			return err
+		}
+		originalURL, err = item.ValueCopy(nil)
+		return err
+	})
+
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	http.Redirect(w, r, string(originalURL), http.StatusFound)
+}
+
+func generateShortURL(data string) string {
+	hasher := sha1.New()
+	hasher.Write([]byte(data))
+	return hex.EncodeToString(hasher.Sum(nil))[:8]
+}

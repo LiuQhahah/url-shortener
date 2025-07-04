@@ -55,7 +55,7 @@ This is a simple URL shortening service built with Go and BadgerDB.
 2.  **Run the Docker container:**
 
     ```bash
-    docker run -d -p 8080:8080 url-shortener
+    docker run -d -p 8080:8080 -v $HOME/badger_data:/tmp/badger url-shortener:latest
     ```
 
     The application will be accessible at `http://localhost:8080`.

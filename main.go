@@ -18,6 +18,11 @@ import (
 	"github.com/spaolacci/murmur3"
 )
 
+type URLData struct {
+	OriginalURL string `json:"original_url"`
+	Count       int    `json:"count"`
+}
+
 var (
 	db *badger.DB
 
@@ -76,7 +81,7 @@ func handleCount(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleMappings(w http.ResponseWriter, r *http.Request) {
-	mappings := make(map[string]string)
+	mappings := make(map[string]URLData)
 	err := db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchSize = 100
@@ -85,13 +90,20 @@ func handleMappings(w http.ResponseWriter, r *http.Request) {
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
 			k := item.Key()
-			err := item.Value(func(v []byte) error {
-				mappings[string(k)] = string(v)
-				return nil
-			})
+			valCopy, err := item.ValueCopy(nil)
 			if err != nil {
 				return err
 			}
+
+			var urlData URLData
+			jsonErr := json.Unmarshal(valCopy, &urlData)
+			if jsonErr != nil { // If unmarshaling fails, assume it's an old plain string
+				urlData = URLData{
+					OriginalURL: string(valCopy),
+					Count:       0,
+				}
+			}
+			mappings[string(k)] = urlData
 		}
 		return nil
 	})
@@ -238,8 +250,19 @@ func handleShorten(w http.ResponseWriter, r *http.Request) {
 
 	shortURL := generateShortURL(originalURL)
 
-	err := db.Update(func(txn *badger.Txn) error {
-		return txn.Set([]byte(shortURL), []byte(originalURL))
+	// Store URLData struct
+	data := URLData{
+		OriginalURL: originalURL,
+		Count:       0,
+	}
+	dataBytes, err := json.Marshal(data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	err = db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(shortURL), dataBytes)
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -256,14 +279,32 @@ func handleRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var originalURL []byte
-	err := db.View(func(txn *badger.Txn) error {
+	var urlData URLData
+	err := db.Update(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte(shortURL))
 		if err != nil {
 			return err
 		}
-		originalURL, err = item.ValueCopy(nil)
-		return err
+		valCopy, err := item.ValueCopy(nil)
+		if err != nil {
+			return err
+		}
+
+		// Try to unmarshal as URLData
+		jsonErr := json.Unmarshal(valCopy, &urlData)
+		if jsonErr != nil { // If unmarshaling fails, assume it's an old plain string
+			urlData = URLData{
+				OriginalURL: string(valCopy),
+				Count:       0,
+			}
+		}
+
+		urlData.Count++
+		updatedDataBytes, err := json.Marshal(urlData)
+		if err != nil {
+			return err
+		}
+		return txn.Set([]byte(shortURL), updatedDataBytes)
 	})
 
 	if err != nil {
@@ -271,7 +312,7 @@ func handleRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Redirect(w, r, string(originalURL), http.StatusFound)
+	http.Redirect(w, r, urlData.OriginalURL, http.StatusFound)
 }
 
 func generateShortURL(data string) string {
